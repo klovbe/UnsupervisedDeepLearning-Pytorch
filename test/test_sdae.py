@@ -6,30 +6,36 @@ from torchvision import datasets, transforms
 import numpy as np
 import argparse
 from udlp.autoencoder.stackedDAE import StackedDAE
+from data_prcoess import mydataset
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='VAE MNIST Example')
-    parser.add_argument('--lr', type=float, default=0.002, metavar='N',
+    parser.add_argument('--lr', type=float, default=0.001, metavar='N',
                         help='learning rate for training (default: 0.001)')
     parser.add_argument('--batch-size', type=int, default=128, metavar='N',
                         help='input batch size for training (default: 128)')
-    parser.add_argument('--pretrainepochs', type=int, default=10, metavar='N',
+    parser.add_argument('--pretrain epochs', type=int, default=10, metavar='N',
                         help='number of epochs to train (default: 10)')
     parser.add_argument('--epochs', type=int, default=10, metavar='N',
                         help='number of epochs to train (default: 10)')
+    parser.add_argument('--save', type=str, default="", metavar='N',
+                        help='path to save model')
+    parser.add_argument('--datapath', type=str, default="", metavar='N',
+                        help='path of data')
+    parser.add_argument('--labelpath', type=str, default="", metavar='N',
+                        help='path of label')
+    parser.add_argument('--input_dim', type=int, default="", metavar='N',
+                        help='input dimension of encoder')
     args = parser.parse_args()
-    
-    train_loader = torch.utils.data.DataLoader(
-        datasets.MNIST('../dataset/mnist', train=True, download=True,
-                       transform=transforms.ToTensor()),
-        batch_size=args.batch_size, shuffle=True, num_workers=2)
-    test_loader = torch.utils.data.DataLoader(
-        datasets.MNIST('../dataset/mnist', train=False, transform=transforms.ToTensor()),
-        batch_size=args.batch_size, shuffle=False, num_workers=2)
 
-    in_features = 784
+    train_loader = torch.utils.data.DataLoader(
+        mydataset(args.datapath, args.labelpath, args.input_dim, transform=transforms.ToTensor(),
+                  target_transform=transforms.ToTensor()),
+        batch_size=args.batch_size, shuffle=True)
+
+    # in_features = 784
     out_features = 500
-    sdae = StackedDAE(input_dim=784, z_dim=10, binary=True,
+    sdae = StackedDAE(input_dim=args.input_dim, z_dim=10, binary=False,
         encodeLayer=[500,500,2000], decodeLayer=[2000,500,500], activation="relu", 
         dropout=0)
     sdae.pretrain(train_loader, test_loader, lr=args.lr, batch_size=args.batch_size, 

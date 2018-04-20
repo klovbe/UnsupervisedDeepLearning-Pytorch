@@ -51,8 +51,9 @@ class StackedDAE(nn.Module):
         return x
 
     def loss_function(self, recon_x, x):
-        loss = -torch.mean(torch.sum(x*torch.log(torch.clamp(recon_x, min=1e-10))+
-            (1-x)*torch.log(torch.clamp(1-recon_x, min=1e-10)), 1))
+        # loss = -torch.mean(torch.sum(x*torch.log(torch.clamp(recon_x, min=1e-10))+
+        #     (1-x)*torch.log(torch.clamp(1-recon_x, min=1e-10)), 1))
+        loss = torch.mean((x-recon_x)**2)
 
         return loss
 
