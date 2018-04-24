@@ -12,15 +12,22 @@ import math
 from udlp.utils import Dataset, masking_noise
 from udlp.ops import MSELoss, BCELoss
 from udlp.autoencoder.denoisingAutoencoder import DenoisingAutoencoder
+import os
+from sklearn.mixture import GaussianMixture
+from sklearn.cluster import KMeans
 
-def buildNetwork(layers, activation="relu", dropout=0):
+def buildNetwork(layers, activation="relu", dropout=0, is_bn=False):
     net = []
     for i in range(1, len(layers)):
         net.append(nn.Linear(layers[i-1], layers[i]))
+        if is_bn:
+            net.append(nn.BatchNorm1d(layers[i]))
         if activation=="relu":
             net.append(nn.ReLU())
         elif activation=="sigmoid":
             net.append(nn.Sigmoid())
+        elif activation=="prelu":
+            net.append(nn.PReLU())
         if dropout > 0:
             net.append(nn.Dropout(dropout))
     return nn.Sequential(*net)
@@ -28,24 +35,25 @@ def buildNetwork(layers, activation="relu", dropout=0):
 class StackedDAE(nn.Module):
     def __init__(self, input_dim=784, z_dim=10, binary=True,
         encodeLayer=[400], decodeLayer=[400], activation="relu", 
-        dropout=0, tied=False):
+        dropout=0, is_bn=False, tied=False):
         super(self.__class__, self).__init__()
         self.z_dim = z_dim
         self.layers = [input_dim] + encodeLayer + [z_dim]
         self.activation = activation
         self.dropout = dropout
-        self.encoder = buildNetwork([input_dim] + encodeLayer, activation=activation, dropout=dropout)
-        self.decoder = buildNetwork([z_dim] + decodeLayer, activation=activation, dropout=dropout)
+        self.encoder = buildNetwork([input_dim] + encodeLayer, activation=activation, dropout=dropout, is_bn=is_bn)
+        self.decoder = buildNetwork([z_dim] + decodeLayer, activation=activation, dropout=dropout, is_bn=is_bn)
         self._enc_mu = nn.Linear(encodeLayer[-1], z_dim)
         
-        self._dec = nn.Linear(decodeLayer[-1], input_dim)
+        self._dec_mu = nn.Linear(decodeLayer[-1], input_dim)
         self._dec_act = None
+        self.binary = binary
         if binary:
             self._dec_act = nn.Sigmoid()
 
     def decode(self, z):
         h = self.decoder(z)
-        x = self._dec(h)
+        x = self._dec_mu(h)
         if self._dec_act is not None:
             x = self._dec_act(x)
         return x
@@ -53,7 +61,7 @@ class StackedDAE(nn.Module):
     def loss_function(self, recon_x, x):
         # loss = -torch.mean(torch.sum(x*torch.log(torch.clamp(recon_x, min=1e-10))+
         #     (1-x)*torch.log(torch.clamp(1-recon_x, min=1e-10)), 1))
-        loss = torch.mean((x-recon_x)**2)
+        loss = torch.mean(torch.sum((x-recon_x)**2, 1))
 
         return loss
 
@@ -64,6 +72,8 @@ class StackedDAE(nn.Module):
         return z, self.decode(z)
 
     def save_model(self, path):
+        # if os.path.exists(path) is False:
+        #     os.mkdir(path)
         torch.save(self.state_dict(), path)
 
     def load_model(self, path):
@@ -127,7 +137,7 @@ class StackedDAE(nn.Module):
         self.decoder[0].weight.data.copy_(daeLayers[-1].deweight.data)
         self.decoder[0].bias.data.copy_(daeLayers[-1].vbias.data)
 
-    def fit(self, trainloader, validloader, lr=0.001, num_epochs=10, corrupt=0.3,
+    def fit(self, trainloader, lr=0.001, num_epochs=10, corrupt=0.3,
         loss_type="mse"):
         """
         data_x: FloatTensor
@@ -138,31 +148,32 @@ class StackedDAE(nn.Module):
             self.cuda()
         print("=====Stacked Denoising Autoencoding layer=======")
         optimizer = optim.Adam(filter(lambda p: p.requires_grad, self.parameters()), lr=lr)
-        if loss_type=="mse":
-            criterion = MSELoss()
-        elif loss_type=="cross-entropy":
+        if self.binary:
             criterion = BCELoss()
+        else:
+            criterion = MSELoss()
 
-        # validate
-        total_loss = 0.0
-        total_num = 0
-        for batch_idx, (inputs, _) in enumerate(validloader):
-            inputs = inputs.view(inputs.size(0), -1).float()
-            if use_cuda:
-                inputs = inputs.cuda()
-            inputs = Variable(inputs)
-            z, outputs = self.forward(inputs)
-
-            valid_recon_loss = criterion(outputs, inputs)
-            total_loss += valid_recon_loss.data[0] * len(inputs)
-            total_num += inputs.size()[0]
-
-        valid_loss = total_loss / total_num
-        print("#Epoch 0: Valid Reconstruct Loss: %.3f" % (valid_loss))
+        # # validate
+        # total_loss = 0.0
+        # total_num = 0
+        # for batch_idx, (inputs, _) in enumerate(validloader):
+        #     inputs = inputs.view(inputs.size(0), -1).float()
+        #     if use_cuda:
+        #         inputs = inputs.cuda()
+        #     inputs = Variable(inputs)
+        #     z, outputs = self.forward(inputs)
+        #
+        #     valid_recon_loss = criterion(outputs, inputs)
+        #     total_loss += valid_recon_loss.data[0] * len(inputs)
+        #     total_num += inputs.size()[0]
+        #
+        # valid_loss = total_loss / total_num
+        # print("#Epoch 0: Valid Reconstruct Loss: %.3f" % (valid_loss))
 
         for epoch in range(num_epochs):
             # train 1 epoch
             train_loss = 0.0
+            total_num = 0
             for batch_idx, (inputs, _) in enumerate(trainloader):
                 inputs = inputs.view(inputs.size(0), -1).float()
                 inputs_corr = masking_noise(inputs, corrupt)
@@ -174,24 +185,28 @@ class StackedDAE(nn.Module):
                 inputs_corr = Variable(inputs_corr)
 
                 z, outputs = self.forward(inputs_corr)
-                recon_loss = criterion(outputs, inputs)
+                recon_loss = self.loss_function(outputs, inputs)
                 train_loss += recon_loss.data[0]*len(inputs)
+                total_num += inputs.size()[0]
                 recon_loss.backward()
                 optimizer.step()
+            train_loss = train_loss/total_num
+            print("#Epoch %3d: Reconstruc Loss: %.3f" %(epoch, train_loss))
 
-            # validate
-            valid_loss = 0.0
-            for batch_idx, (inputs, _) in enumerate(validloader):
-                inputs = inputs.view(inputs.size(0), -1).float()
-                if use_cuda:
-                    inputs = inputs.cuda()
-                inputs = Variable(inputs)
-                z, outputs = self.forward(inputs)
+            # # validate
+            # valid_loss = 0.0
+            # for batch_idx, (inputs, _) in enumerate(validloader):
+            #     inputs = inputs.view(inputs.size(0), -1).float()
+            #     if use_cuda:
+            #         inputs = inputs.cuda()
+            #     inputs = Variable(inputs)
+            #     z, outputs = self.forward(inputs)
+            #
+            #     valid_recon_loss = criterion(outputs, inputs)
+            #     valid_loss += valid_recon_loss.data[0] * len(inputs)
+            #
+            # print("#Epoch %3d: Reconstruct Loss: %.3f, Valid Reconstruct Loss: %.3f" % (
+            #     epoch+1, train_loss / len(trainloader.dataset), valid_loss / len(validloader.dataset)))
 
-                valid_recon_loss = criterion(outputs, inputs)
-                valid_loss += valid_recon_loss.data[0] * len(inputs)
-
-            print("#Epoch %3d: Reconstruct Loss: %.3f, Valid Reconstruct Loss: %.3f" % (
-                epoch+1, train_loss / len(trainloader.dataset), valid_loss / len(validloader.dataset)))
 
 
